@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Wisdom School - Voice Recorder</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: #f4f6f8;
+      color: #222;
+    }
+    .header {
+      background: #1f4e78;
+      color: white;
+      text-align: center;
+      padding: 22px 16px;
+    }
+    .header h1 { margin: 0; font-size: 22px; }
+    .header p { margin: 6px 0 0; font-size: 13px; }
+    .card {
+      max-width: 520px;
+      margin: 28px auto;
+      background: white;
+      border-radius: 14px;
+      box-shadow: 0 2px 10px rgba(0,0,0,.08);
+      padding: 22px;
+    }
+    .task-box {
+      background: #eef3f7;
+      border-radius: 9px;
+      padding: 12px;
+      margin-bottom: 18px;
+      font-size: 13px;
+    }
+    .task-id { color: #666; margin-bottom: 4px; }
+    .status {
+      display: none;
+      padding: 11px;
+      border-radius: 8px;
+      margin-bottom: 14px;
+      background: #fff3e0;
+      color: #e65100;
+      font-weight: bold;
+      font-size: 13px;
+    }
+    .error {
+      display: none;
+      padding: 11px;
+      border-radius: 8px;
+      margin-bottom: 14px;
+      background: #ffebee;
+      color: #c62828;
+      font-size: 13px;
+      font-weight: bold;
+    }
+    .timer {
+      text-align: center;
+      font-size: 38px;
+      font-weight: bold;
+      color: #1f4e78;
+      margin: 20px 0;
+    }
+    button {
+      width: 100%;
+      border: none;
+      border-radius: 8px;
+      padding: 13px;
+      margin-top: 9px;
+      font-size: 15px;
+      font-weight: bold;
+      cursor: pointer;
+    }
+    #recordButton { background: #6a1b9a; color: white; }
+    #stopButton { background: #c62828; color: white; display: none; }
+    #sendButton { background: #2e7d32; color: white; display: none; }
+    #cancelButton { background: #eeeeee; color: #444; display: none; }
+    button:disabled { opacity: .6; cursor: wait; }
+    audio { width: 100%; display: none; margin-top: 14px; }
+    .note { color: #777; font-size: 12px; line-height: 1.5; margin-top: 14px; }
+    @media (max-width: 560px) {
+      .card { margin: 12px; padding: 18px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>Wisdom School</h1>
+    <p>Voice Message Recorder</p>
+  </div>
+
+  <div class="card">
+    <div class="task-box">
+      <div class="task-id" id="taskIdText">Task</div>
+      <strong>Record a short voice message for the administrator.</strong>
+    </div>
+
+    <div id="status" class="status"></div>
+    <div id="error" class="error"></div>
+    <div id="timer" class="timer">0:00</div>
+
+    <button id="recordButton" type="button" onclick="startRecording()">🎤 Start Recording</button>
+    <button id="stopButton" type="button" onclick="stopRecording()">⏹ Stop Recording</button>
+
+    <audio id="preview" controls></audio>
+
+    <button id="sendButton" type="button" onclick="sendVoice()">Send Voice</button>
+    <button id="cancelButton" type="button" onclick="resetRecorder()">Delete / Record Again</button>
+
+    <div class="note">
+      Maximum recording time: 60 seconds.<br>
+      Your browser will ask for microphone permission the first time.
+    </div>
+  </div>
+
+<script>
+  const params = new URLSearchParams(window.location.search);
+  const taskId = params.get("taskId") || "";
+  const nonce = params.get("nonce") || "";
+
+  let recorder = null;
+  let stream = null;
+  let chunks = [];
+  let audioBlob = null;
+  let mimeType = "audio/webm";
+  let timerInterval = null;
+  let startedAt = 0;
+  let sent = false;
+
+  document.getElementById("taskIdText").textContent =
+    taskId ? "Task ID: " + taskId : "Task ID not supplied";
+
+  function showStatus(message) {
+    const el = document.getElementById("status");
+    el.textContent = message;
+    el.style.display = "block";
+  }
+
+  function hideStatus() {
+    document.getElementById("status").style.display = "none";
+  }
+
+  function showError(message) {
+    const el = document.getElementById("error");
+    el.textContent = message;
+    el.style.display = "block";
+  }
+
+  function hideError() {
+    document.getElementById("error").style.display = "none";
+  }
+
+  function setButtons(recording, readyToSend) {
+    document.getElementById("recordButton").style.display = recording || readyToSend ? "none" : "block";
+    document.getElementById("stopButton").style.display = recording ? "block" : "none";
+    document.getElementById("sendButton").style.display = readyToSend ? "block" : "none";
+    document.getElementById("cancelButton").style.display = readyToSend ? "block" : "none";
+  }
+
+  function updateTimer() {
+    const seconds = Math.floor((Date.now() - startedAt) / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const remaining = seconds % 60;
+    document.getElementById("timer").textContent =
+      minutes + ":" + String(remaining).padStart(2, "0");
+
+    if (seconds >= 60) {
+      stopRecording();
+    }
+  }
+
+  async function startRecording() {
+    hideError();
+    hideStatus();
+
+    if (!window.opener) {
+      showError("Please open this recorder from the Wisdom School task screen.");
+      return;
+    }
+
+    if (!taskId || !nonce) {
+      showError("This recorder link is incomplete. Please close it and click Record Voice again.");
+      return;
+    }
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) {
+      showError("Voice recording is not supported by this browser. Please use a recent Chrome, Edge, or Safari browser.");
+      return;
+    }
+
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+      const preferredTypes = [
+        "audio/webm;codecs=opus",
+        "audio/webm",
+        "audio/mp4"
+      ];
+
+      let selected = "";
+      for (const type of preferredTypes) {
+        if (MediaRecorder.isTypeSupported(type)) {
+          selected = type;
+          break;
+        }
+      }
+
+      mimeType = selected || "audio/webm";
+      recorder = selected ? new MediaRecorder(stream, { mimeType: selected }) : new MediaRecorder(stream);
+      chunks = [];
+      audioBlob = null;
+
+      recorder.ondataavailable = function(event) {
+        if (event.data && event.data.size > 0) {
+          chunks.push(event.data);
+        }
+      };
+
+      recorder.onstop = function() {
+        if (stream) {
+          stream.getTracks().forEach(track => track.stop());
+          stream = null;
+        }
+
+        mimeType = recorder.mimeType || mimeType || "audio/webm";
+        audioBlob = new Blob(chunks, { type: mimeType });
+
+        const preview = document.getElementById("preview");
+        preview.src = URL.createObjectURL(audioBlob);
+        preview.style.display = "block";
+
+        stopTimer();
+        setButtons(false, true);
+        showStatus("Recording complete. Play it below, then send it to the task.");
+      };
+
+      recorder.start();
+      startedAt = Date.now();
+      timerInterval = setInterval(updateTimer, 500);
+      setButtons(true, false);
+      showStatus("🔴 Recording... Speak clearly.");
+      updateTimer();
+    } catch (error) {
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+        stream = null;
+      }
+      showError("Microphone access was not allowed. Please choose Allow when your browser asks for microphone access, then try again.");
+    }
+  }
+
+  function stopRecording() {
+    if (recorder && recorder.state === "recording") {
+      recorder.stop();
+    }
+  }
+
+  function stopTimer() {
+    if (timerInterval) {
+      clearInterval(timerInterval);
+      timerInterval = null;
+    }
+  }
+
+  function resetRecorder() {
+    stopTimer();
+    if (recorder && recorder.state === "recording") {
+      recorder.stop();
+    }
+    if (stream) {
+      stream.getTracks().forEach(track => track.stop());
+      stream = null;
+    }
+    recorder = null;
+    chunks = [];
+    audioBlob = null;
+    sent = false;
+    document.getElementById("preview").removeAttribute("src");
+    document.getElementById("preview").style.display = "none";
+    document.getElementById("timer").textContent = "0:00";
+    hideStatus();
+    hideError();
+    setButtons(false, false);
+  }
+
+  function blobToBase64(blob) {
+    return new Promise(function(resolve, reject) {
+      const reader = new FileReader();
+      reader.onloadend = function() {
+        try {
+          const result = String(reader.result || "");
+          const comma = result.indexOf(",");
+          resolve(comma >= 0 ? result.substring(comma + 1) : result);
+        } catch (error) {
+          reject(error);
+        }
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  async function sendVoice() {
+    hideError();
+
+    if (!audioBlob) {
+      showError("Please record a voice message first.");
+      return;
+    }
+
+    if (sent) return;
+
+    const sendButton = document.getElementById("sendButton");
+    const cancelButton = document.getElementById("cancelButton");
+    sendButton.disabled = true;
+    cancelButton.disabled = true;
+    sendButton.textContent = "Preparing...";
+    showStatus("⏳ Sending voice message to the school system...");
+
+    try {
+      const base64Data = await blobToBase64(audioBlob);
+
+      if (base64Data.length > 10 * 1024 * 1024) {
+        throw new Error("The recording is too large. Please record a shorter message.");
+      }
+
+      sent = true;
+      window.opener.postMessage({
+        type: "WISDOM_SCHOOL_VOICE",
+        success: true,
+        taskId: taskId,
+        nonce: nonce,
+        fileName: "voice_" + Date.now() + (mimeType.indexOf("mp4") !== -1 ? ".m4a" : ".webm"),
+        mimeType: mimeType,
+        base64Data: base64Data
+      }, "*");
+
+      showStatus("✅ Voice sent. You can close this window.");
+      sendButton.textContent = "Sent";
+      setTimeout(function() { window.close(); }, 700);
+    } catch (error) {
+      sent = false;
+      sendButton.disabled = false;
+      cancelButton.disabled = false;
+      sendButton.textContent = "Send Voice";
+      showError(error.message || "Unable to send the recording.");
+    }
+  }
+</script>
+</body>
+</html>
